@@ -1,14 +1,7 @@
 
-#include <arpa/inet.h>
+#include "platform.h"
 #include <mutex>
-#include <net/if.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <string.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 class MailSend {
@@ -39,20 +32,54 @@ private:
 		}
 		return false;
 	}
-	void write_line(char const *p)
+	void write_line(char const *p, size_t n = -1)
 	{
-		int n = strlen(p);
+		if (n == -1) {
+			n = strlen(p);
+		}
 		send(sock, p, n, 0);
 		send(sock, "\r\n", 2, 0);
-
 	}
 	void write_line(std::string const &s)
 	{
-		write_line(s.c_str());
+		write_line(s.c_str(), s.size());
 	}
 public:
-	static std::string get_current_date()
+	static std::string get_current_date_string()
 	{
+#if _WIN32
+		SYSTEMTIME t;
+		TIME_ZONE_INFORMATION z;
+		GetLocalTime(&t);
+		GetTimeZoneInformation(&z);
+
+		char mon[4];
+		memcpy(mon, "JanFebMarAprMayJunJulAugSepOctNovDec" + ((t.wMonth + 11) % 12 * 3), 3);
+		mon[3] = 0;
+		char tmp[100];
+		char z_sign = '+';
+		int z_min = 0;
+		z_min = -z.Bias;
+		if (z_min < 0) {
+			z_sign = '-';
+			z_min = -z_min;
+		}
+		auto z_hour = z_min / 60;
+		z_min %= 60;
+		sprintf(tmp, "%d %s %d %02d:%02d:%02d %c%02d%02d"
+				, t.wDay
+				, mon
+				, t.wYear
+				, t.wHour
+				, t.wMinute
+				, t.wSecond
+				, z_sign
+				, z_hour
+				, z_min
+				);
+		return tmp;
+
+#else
 		time_t t;
 		time(&t);
 		struct tm *tm = localtime(&t);
@@ -82,12 +109,13 @@ public:
 				, z_min
 				);
 		return tmp;
+#endif
 	}
 public:
 	void run()
 	{
 		struct sockaddr_in server;
-		char *deststr;
+		char const *deststr;
 
 		deststr = "10.10.10.10"; // SMTP server
 
@@ -106,6 +134,11 @@ public:
 			}
 			server.sin_addr.s_addr = *(unsigned int *)host->h_addr_list[0];
 		}
+
+		std::string mail_from = "foo@example.com";
+		std::string rcpt_to = "bar@example.com";
+		std::string date = get_current_date_string();
+		std::string subject = "test";
 
 		if (connect(sock, (struct sockaddr *)&server, sizeof(server)) == 0) {
 
@@ -141,7 +174,6 @@ public:
 				}
 				std::string line;
 				if (read_line(&line)) {
-					puts(line.c_str());
 					int code = strtol(line.c_str(), nullptr, 10);
 					if (code == 220) {
 						if (state == State::CONNECT) {
@@ -153,10 +185,10 @@ public:
 						break;
 					} else if (code == 250) {
 						if (state == State::HELO) {
-							write_line("MAIL FROM: foo@example.com");
+							write_line("MAIL FROM: " + mail_from);
 							state = State::MAIL_FROM;
 						} else if (state == State::MAIL_FROM) {
-							write_line("RCPT TO: bar@example.com");
+							write_line("RCPT TO: " + rcpt_to);
 							state = State::RCPT_TO;
 						} else if (state == State::RCPT_TO) {
 							write_line("DATA");
@@ -164,15 +196,15 @@ public:
 						}
 					} else if (code == 354) {
 						if (state == State::DATA) {
-							std::string date = get_current_date();
-							write_line("From: foo@example.com");
-							write_line("To: bar@example.com");
+							write_line("From: " + mail_from);
+							write_line("To: " + rcpt_to);
 							write_line("Date: " + date);
-							write_line("Subject: test");
+							write_line("Subject: " + subject);
 							write_line("");
 							write_line("Hello, world 1");
 							write_line("Hello, world 2");
 							write_line("Hello, world 3");
+							write_line("..");
 							write_line(".");
 							write_line("QUIT");
 							state = State::QUIT;
@@ -182,17 +214,27 @@ public:
 					std::this_thread::yield();
 				}
 			}
+
+			recv_thread.join();
 		}
 
-		recv_thread.join();
-		close(sock);
+		closesocket(sock);
 	}
 };
 
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+	WSAData wsaData;
+	WSAStartup(MAKEWORD(2,0), &wsaData);
+#endif
+
 	MailSend ms;
 	ms.run();
+
+#ifdef _WIN32
+	WSACleanup();
+#endif
 	return 0;
 }
 
