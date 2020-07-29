@@ -7,7 +7,8 @@ unix:LIBS += -lpthread
 win32:LIBS += -lws2_32
 
 SOURCES += \
+        MailSend.cpp \
         main.cpp
 
 HEADERS += \
-    platform.h
+    MailSend.h
