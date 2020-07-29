@@ -3,14 +3,23 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <algorithm>
 
 #ifdef _WIN32
 
 #include <WinSock2.h>
 #include <Windows.h>
 
-void socket_startup();
-void socket_cleanup();
+void socket_startup()
+{
+	WSAData wsaData;
+	WSAStartup(MAKEWORD(2,0), &wsaData);
+}
+
+void socket_cleanup()
+{
+	WSACleanup();
+}
 
 #else
 
@@ -29,20 +38,6 @@ void socket_cleanup();
 
 #endif
 
-#ifdef _WIN32
-
-void socket_startup()
-{
-	WSAData wsaData;
-	WSAStartup(MAKEWORD(2,0), &wsaData);
-}
-
-void socket_cleanup()
-{
-	WSACleanup();
-}
-
-#endif
 
 struct MailSend::Private {
 	int sock;
@@ -56,7 +51,6 @@ struct MailSend::Private {
 MailSend::MailSend()
 	: m(new Private)
 {
-
 }
 
 MailSend::~MailSend()
@@ -146,8 +140,7 @@ std::string MailSend::get_current_date_string()
 	mon[3] = 0;
 
 	char z_sign = '+';
-	int z_min = 0;
-	z_min = dt.gmtoff;
+	int z_min = dt.gmtoff;
 	if (z_min < 0) {
 		z_sign = '-';
 		z_min = -z_min;
@@ -171,23 +164,101 @@ std::string MailSend::get_current_date_string()
 	return tmp;
 }
 
-void MailSend::send(const MailSend::Mail &mail)
+static std::string trim(std::string const &line)
 {
-	struct sockaddr_in server;
-	char const *deststr;
+	size_t i = 0;
+	size_t j = line.size();
+	char const *p = line.c_str();
+	while (i < j && isspace((unsigned char)p[i])) i++;
+	while (i < j && isspace((unsigned char)p[j - 1])) j--;
+	return line.substr(i, j - i);
+}
 
-	deststr = "10.10.10.10"; // SMTP server
+void MailSend::make_header(Mail *mail, std::vector<HeaderLine> *out)
+{
+	out->clear();
+	bool has_from = false;
+	bool has_to = false;
+	bool has_date = false;
+	for (std::string const &line : mail->header) {
+		HeaderLine h;
+		h.order = UINT_MAX;
+		auto i = line.find(':');
+		if (i != std::string::npos) {
+			h.name = trim(line.substr(0, i));
+			h.value = trim(line.substr(i + 1));
+			if (h.name == "From") {
+				has_from = true;
+				if (mail->mail_from.empty()) {
+					mail->mail_from = h.value;
+				}
+				h.order = 0;
+			} else if (h.name == "To") {
+				has_to = true;
+				if (mail->rcpt_to.empty()) {
+					mail->rcpt_to = h.value;
+				}
+				h.order = 1;
+			} else if (h.name == "Date") {
+				has_date = true;
+				h.order = 2;
+			} else if (h.name == "Subject") {
+				h.order = 3;
+			}
+			out->push_back(h);
+		}
+	}
+	if (!has_from) {
+		HeaderLine h;
+		h.name = "From";
+		h.value = mail->mail_from;
+		h.order = 0;
+		out->push_back(h);
+	}
+	if (!has_to) {
+		HeaderLine h;
+		h.name = "To";
+		h.value = mail->rcpt_to;
+		h.order = 1;
+		out->push_back(h);
+	}
+	if (!has_date) {
+		HeaderLine h;
+		h.name = "Date";
+		h.value = get_current_date_string();
+		h.order = 2;
+		out->push_back(h);
+	}
+	std::sort(out->begin(), out->end(), [](HeaderLine const &l, HeaderLine const &r){
+		return [](HeaderLine const &l, HeaderLine const &r){
+			if (l.order < r.order) return -1;
+			if (l.order > r.order) return 1;
+			if (l.name < r.name) return -1;
+			if (l.name > r.name) return 1;
+			return 0;
+		}(l, r) < 0;
+	});
+}
+
+void MailSend::send(Mail mail)
+{
+	std::vector<HeaderLine> header;
+	make_header(&mail, &header);
+
+	char const *smtp_server = "10.10.10.10";
+
+	struct sockaddr_in server;
 
 	m->sock = socket(AF_INET, SOCK_STREAM, 0);
 
 	server.sin_family = AF_INET;
 	server.sin_port = htons(25);
 
-	server.sin_addr.s_addr = inet_addr(deststr);
+	server.sin_addr.s_addr = inet_addr(smtp_server);
 	if (server.sin_addr.s_addr == 0xffffffff) {
 		struct hostent *host;
 
-		host = gethostbyname(deststr);
+		host = gethostbyname(smtp_server);
 		if (host == nullptr) {
 			return;
 		}
@@ -250,8 +321,8 @@ void MailSend::send(const MailSend::Mail &mail)
 					}
 				} else if (code == 354) {
 					if (state == State::DATA) {
-						for (std::string const &line : mail.header) {
-							write_line(line);
+						for (auto const &h : header) {
+							write_line(h.name + ": " + h.value);
 						}
 						write_line("");
 						for (std::string line : mail.lines) {

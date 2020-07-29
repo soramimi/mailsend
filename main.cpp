@@ -11,12 +11,12 @@ int main(int argc, char **argv)
 	std::string subject = "test";
 
 	MailSend::Mail mail;
-	mail.mail_from = mail_from;
-	mail.rcpt_to = rcpt_to;
+//	mail.mail_from = mail_from;
+//	mail.rcpt_to = rcpt_to;
 
 	mail.header.push_back("From: " + mail_from);
 	mail.header.push_back("To: " + rcpt_to);
-	mail.header.push_back("Date: " + date);
+//	mail.header.push_back("Date: " + date);
 	mail.header.push_back("Subject: " + subject);
 
 	mail.lines.push_back("Hello, world 1");
