@@ -47,32 +47,54 @@ private:
 public:
 	static std::string get_current_date_string()
 	{
+		struct DateTime {
+			int year = 0;
+			int month = 0;
+			int day = 0;
+			int hour = 0;
+			int minute = 0;
+			int second = 0;
+			int gmtoff = 0;
+		};
+		DateTime dt;
+
 #if _WIN32
-		SYSTEMTIME t;
-		TIME_ZONE_INFORMATION z;
-		GetLocalTime(&t);
-		GetTimeZoneInformation(&z);
+		{
+			SYSTEMTIME t;
+			TIME_ZONE_INFORMATION z;
+			GetLocalTime(&t);
+			GetTimeZoneInformation(&z);
+
+			dt.year = t.wYear;
+			dt.month = t.wMonth;
+			dt.day = t.wDay;
+			dt.hour = t.wHour;
+			dt.minute = t.wMinute;
+			dt.second = t.wSecond;
+			dt.gmtoff = -z.Bias * 60;
+		}
 
 		char mon[4];
-		memcpy(mon, "JanFebMarAprMayJunJulAugSepOctNovDec" + ((t.wMonth + 11) % 12 * 3), 3);
+		memcpy(mon, "JanFebMarAprMayJunJulAugSepOctNovDec" + ((dt.month + 11) % 12 * 3), 3);
 		mon[3] = 0;
 		char tmp[100];
 		char z_sign = '+';
 		int z_min = 0;
-		z_min = -z.Bias;
+		z_min = dt.gmtoff;
 		if (z_min < 0) {
 			z_sign = '-';
 			z_min = -z_min;
 		}
+		z_min /= 60;
 		auto z_hour = z_min / 60;
 		z_min %= 60;
 		sprintf(tmp, "%d %s %d %02d:%02d:%02d %c%02d%02d"
-				, t.wDay
+				, dt.day
 				, mon
-				, t.wYear
-				, t.wHour
-				, t.wMinute
-				, t.wSecond
+				, dt.year
+				, dt.hour
+				, dt.minute
+				, dt.second
 				, z_sign
 				, z_hour
 				, z_min
@@ -136,7 +158,7 @@ public:
 		}
 
 		std::string mail_from = "foo@example.com";
-		std::string rcpt_to = "bar@example.com";
+		std::string rcpt_to = "soramimi@soramimi.jp";
 		std::string date = get_current_date_string();
 		std::string subject = "test";
 
