@@ -3,6 +3,27 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <string>
+
+class HostNameResolver {
+private:
+	char buf[2048];
+	struct hostent tmp;
+public:
+	struct hostent *gethostbyname(char const *name)
+	{
+		struct hostent *he = nullptr;
+		{
+			int err = 0;
+#if defined(_WIN32) || defined(__APPLE__)
+			he = ::gethostbyname(name);
+#else
+			gethostbyname_r(name, &tmp, buf, sizeof(buf), &he, &err);
+#endif
+		}
+		return he;
+	}
+};
 
 class MailSend {
 private:
@@ -117,30 +138,67 @@ public:
 		struct sockaddr_in server;
 		char const *deststr;
 
-		deststr = "10.10.10.10"; // SMTP server
+		deststr = "10.0.0.10"; // SMTP server
 
 		sock = socket(AF_INET, SOCK_STREAM, 0);
 
 		server.sin_family = AF_INET;
 		server.sin_port = htons(25);
 
-		server.sin_addr.s_addr = inet_addr(deststr);
-		if (server.sin_addr.s_addr == 0xffffffff) {
-			struct hostent *host;
-
-			host = gethostbyname(deststr);
+		{
+			struct hostent *host = HostNameResolver().gethostbyname(deststr);
 			if (host == nullptr) {
 				return;
 			}
 			server.sin_addr.s_addr = *(unsigned int *)host->h_addr_list[0];
 		}
 
-		std::string mail_from = "foo@example.com";
-		std::string rcpt_to = "bar@example.com";
-		std::string date = get_current_date_string();
-		std::string subject = "test";
+
+		struct Mail {
+			std::string helo;
+			std::string mail_from;
+			std::string rcpt_to;
+
+			std::string from;
+			std::string to;
+			std::string date;
+			std::string subject;
+
+			std::vector<std::string> body;
+		};
+
+		Mail mail;
+
+		mail.from = "soramimi@soramimi.jp";
+		mail.to = "soramimi@soramimi.jp";
+		mail.subject = "test";
+
+		mail.body.push_back("Hello, world 1");
+		mail.body.push_back(".Hello, world 2");
+		mail.body.push_back("..Hello, world 3");
+		mail.body.push_back(".");
 
 		if (connect(sock, (struct sockaddr *)&server, sizeof(server)) == 0) {
+
+			if (mail.helo.empty()) {
+				mail.helo = "example.com";
+			}
+
+			if (mail.mail_from.empty()) {
+				mail.mail_from = mail.from;
+			} else if (mail.from.empty()) {
+				mail.from = mail.mail_from;
+			}
+
+			if (mail.rcpt_to.empty()) {
+				mail.rcpt_to = mail.to;
+			} else if (mail.to.empty()) {
+				mail.to = mail.rcpt_to;
+			}
+
+			if (mail.date.empty()) {
+				mail.date = get_current_date_string();
+			}
 
 			recv_thread = std::thread([&](){
 				while (1) {
@@ -177,7 +235,7 @@ public:
 					int code = strtol(line.c_str(), nullptr, 10);
 					if (code == 220) {
 						if (state == State::CONNECT) {
-							write_line("HELO example");
+							write_line("HELO " + mail.helo);
 							state = State::HELO;
 						}
 					} else if (code == 221) {
@@ -185,10 +243,10 @@ public:
 						break;
 					} else if (code == 250) {
 						if (state == State::HELO) {
-							write_line("MAIL FROM: " + mail_from);
+							write_line("MAIL FROM: " + mail.mail_from);
 							state = State::MAIL_FROM;
 						} else if (state == State::MAIL_FROM) {
-							write_line("RCPT TO: " + rcpt_to);
+							write_line("RCPT TO: " + mail.rcpt_to);
 							state = State::RCPT_TO;
 						} else if (state == State::RCPT_TO) {
 							write_line("DATA");
@@ -196,15 +254,34 @@ public:
 						}
 					} else if (code == 354) {
 						if (state == State::DATA) {
-							write_line("From: " + mail_from);
-							write_line("To: " + rcpt_to);
-							write_line("Date: " + date);
-							write_line("Subject: " + subject);
+							// send header
+							write_line("From: " + mail.from);
+							write_line("To: " + mail.to);
+							write_line("Date: " + mail.date);
+							write_line("Subject: " + mail.subject);
 							write_line("");
-							write_line("Hello, world 1");
-							write_line("Hello, world 2");
-							write_line("Hello, world 3");
-							write_line("..");
+							// send body
+							for (std::string const &line : mail.body) {
+								std::vector<char> v;
+								v.reserve(line.size());
+								char const *p = line.c_str();
+								if (*p == '.') {
+									v.push_back('.');
+								}
+								for (size_t i = 0; i < line.size(); i++) {
+									char c = p[i];
+									if (c == '\r') continue;
+									if (c == '\n') continue;
+									v.push_back(c);
+								}
+								if (v.empty()) {
+									char c = 0;
+									write_line(&c, 0);
+								} else {
+									write_line(v.data(), v.size());
+								}
+							}
+							// end body
 							write_line(".");
 							write_line("QUIT");
 							state = State::QUIT;

@@ -17,6 +17,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#define closesocket(S) close(S)
+
 #endif
 
 #endif // PLATFORM_H
