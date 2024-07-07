@@ -1,29 +1,37 @@
 
 #include "MailSend.h"
+#include <string_view>
 
 int main(int argc, char **argv)
 {
 	socket_startup();
 
-	std::string mail_from = "foo@example.com";
-	std::string rcpt_to = "soramimi@soramimi.jp";
-	std::string date = MailSend::get_current_date_string();
-	std::string subject = "test";
-
+#if 0
 	MailSend::Mail mail;
-//	mail.mail_from = mail_from;
-//	mail.rcpt_to = rcpt_to;
+	mail.mail_from = "soramimi@soramimi.jp";
+	mail.rcpt_to= "fi7s-fct@asahi-net.or.jp";
+	mail.subject = "test9";
 
-	mail.header.push_back("From: " + mail_from);
-	mail.header.push_back("To: " + rcpt_to);
-//	mail.header.push_back("Date: " + date);
-	mail.header.push_back("Subject: " + subject);
+	mail.add_header("Subject: " + mail.subject);
 
-	mail.lines.push_back("Hello, world 1");
-	mail.lines.push_back("Hello, world 2");
-	mail.lines.push_back("Hello, world 3");
+	mail.add_body("Hello, world 1");
+	mail.add_body("Hello, world 2");
+	mail.add_body("Hello, world 3");
+#else
+	std::string text = R"---(
+From: soramimi@soramimi.jp
+To: fi7s-fct@asahi-net.or.jp
+Subject: test10
 
-	MailSend ms;
+Hello, world 1
+Hello, world 2
+Hello, world 3
+)---";
+	MailSend::Mail mail(text);
+
+#endif
+
+	MailSend ms("192.168.0.25", "example.com");
 	ms.send(mail);
 
 	socket_cleanup();

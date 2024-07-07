@@ -4,6 +4,7 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <climits>
 
 #ifdef _WIN32
 
@@ -39,6 +40,52 @@ void socket_cleanup()
 #endif
 
 
+MailSend::Mail::Mail(const std::string_view &text)
+{
+	enum State {
+		START,
+		HEADER,
+		BODY,
+	};
+	State state = START;
+	char const *begin = text.data();
+	char const *end = begin + text.size();
+	char const *next = begin;
+	char const *line = next;
+	while (next < end) {
+		int c = 0;
+		if (next < end) {
+			c = (unsigned char)*next;
+		}
+		if (c == '\n' || c == '\r') {
+			std::string_view sv(line, next - line);
+			if (state == START && sv.empty()) {
+				// ignore
+			} else {
+				if (state == START) {
+					state = HEADER;
+				}
+				if (state == HEADER) {
+					if (sv.empty()) {
+						state = BODY;
+					} else {
+						header.push_back(std::string(sv));
+					}
+				} else if (state == BODY) {
+					body.push_back(std::string(sv));
+				}
+			}
+			if (c == 0) break;
+			if (c == '\r') next++;
+			if (c == '\n') next++;
+			line = next;
+		} else {
+			next++;
+		}
+	}
+}
+
+
 struct MailSend::Private {
 	int sock;
 	bool disconnected = false;
@@ -46,11 +93,24 @@ struct MailSend::Private {
 	std::vector<char> recv_buffer;
 	std::thread recv_thread;
 	bool recv_thread_interrupted = {false};
+	std::string smtp_server;
+	std::string helo;
 };
 
-MailSend::MailSend()
+MailSend::MailSend(std::string const &smtp_server, const std::string &helo)
 	: m(new Private)
 {
+	set_smtp_server(smtp_server);
+}
+
+void MailSend::set_smtp_server(const std::string &server)
+{
+	m->smtp_server= server;
+}
+
+void MailSend::set_helo(const std::string &domain)
+{
+	m->helo = domain;
 }
 
 MailSend::~MailSend()
@@ -180,6 +240,12 @@ void MailSend::make_header(Mail *mail, std::vector<HeaderLine> *out)
 	bool has_from = false;
 	bool has_to = false;
 	bool has_date = false;
+	enum  {
+		HEADER_ORDER_From = -9,
+		HEADER_ORDER_To = -8,
+		HEADER_ORDER_Date = -7,
+		HEADER_ORDER_Subject = -6,
+	};
 	for (std::string const &line : mail->header) {
 		HeaderLine h;
 		h.order = UINT_MAX;
@@ -192,18 +258,21 @@ void MailSend::make_header(Mail *mail, std::vector<HeaderLine> *out)
 				if (mail->mail_from.empty()) {
 					mail->mail_from = h.value;
 				}
-				h.order = 0;
+				h.order = HEADER_ORDER_From;
 			} else if (h.name == "To") {
 				has_to = true;
 				if (mail->rcpt_to.empty()) {
 					mail->rcpt_to = h.value;
 				}
-				h.order = 1;
+				h.order = HEADER_ORDER_To;
 			} else if (h.name == "Date") {
 				has_date = true;
-				h.order = 2;
+				h.order = HEADER_ORDER_Date;
 			} else if (h.name == "Subject") {
-				h.order = 3;
+				if (mail->subject.empty()) {
+					mail->subject = h.value;
+				}
+				continue; // don't add subject here
 			}
 			out->push_back(h);
 		}
@@ -212,29 +281,34 @@ void MailSend::make_header(Mail *mail, std::vector<HeaderLine> *out)
 		HeaderLine h;
 		h.name = "From";
 		h.value = mail->mail_from;
-		h.order = 0;
+		h.order = HEADER_ORDER_From;
 		out->push_back(h);
 	}
 	if (!has_to) {
 		HeaderLine h;
 		h.name = "To";
 		h.value = mail->rcpt_to;
-		h.order = 1;
+		h.order = HEADER_ORDER_To;
 		out->push_back(h);
 	}
 	if (!has_date) {
 		HeaderLine h;
 		h.name = "Date";
 		h.value = get_current_date_string();
-		h.order = 2;
+		h.order = HEADER_ORDER_Date;
+		out->push_back(h);
+	}
+	{ // add subject here
+		HeaderLine h;
+		h.name = "Subject";
+		h.value = mail->subject;
+		h.order = HEADER_ORDER_Subject;
 		out->push_back(h);
 	}
 	std::sort(out->begin(), out->end(), [](HeaderLine const &l, HeaderLine const &r){
 		return [](HeaderLine const &l, HeaderLine const &r){
 			if (l.order < r.order) return -1;
 			if (l.order > r.order) return 1;
-			if (l.name < r.name) return -1;
-			if (l.name > r.name) return 1;
 			return 0;
 		}(l, r) < 0;
 	});
@@ -245,8 +319,6 @@ void MailSend::send(Mail mail)
 	std::vector<HeaderLine> header;
 	make_header(&mail, &header);
 
-	char const *smtp_server = "10.10.10.10";
-
 	struct sockaddr_in server;
 
 	m->sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -254,11 +326,11 @@ void MailSend::send(Mail mail)
 	server.sin_family = AF_INET;
 	server.sin_port = htons(25);
 
-	server.sin_addr.s_addr = inet_addr(smtp_server);
+	server.sin_addr.s_addr = inet_addr(m->smtp_server.c_str());
 	if (server.sin_addr.s_addr == 0xffffffff) {
 		struct hostent *host;
 
-		host = gethostbyname(smtp_server);
+		host = gethostbyname(m->smtp_server.c_str());
 		if (host == nullptr) {
 			return;
 		}
@@ -302,7 +374,7 @@ void MailSend::send(Mail mail)
 				int code = strtol(line.c_str(), nullptr, 10);
 				if (code == 220) {
 					if (state == State::CONNECT) {
-						write_line("HELO example");
+						write_line("HELO " + (m->helo.empty() ? std::string("exmaple.com") : m->helo));
 						state = State::HELO;
 					}
 				} else if (code == 221) {
@@ -325,7 +397,7 @@ void MailSend::send(Mail mail)
 							write_line(h.name + ": " + h.value);
 						}
 						write_line("");
-						for (std::string line : mail.lines) {
+						for (std::string line : mail.body) {
 							if (line.c_str()[0] == '.') {
 								line = '.' + line;
 							}
@@ -335,6 +407,9 @@ void MailSend::send(Mail mail)
 						write_line("QUIT");
 						state = State::QUIT;
 					}
+				} else {
+					fprintf(stderr, "%s\n", line.c_str());
+					break;
 				}
 			} else {
 				std::this_thread::yield();
@@ -346,3 +421,4 @@ void MailSend::send(Mail mail)
 
 	closesocket(m->sock);
 }
+
